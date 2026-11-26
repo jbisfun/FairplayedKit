@@ -73,10 +73,19 @@ int zip_extract_all(const char *zip_path, const char *dest_dir, char *err, size_
         return -1;
     }
     struct stat st;
-    fstat(fd, &st);
+    if (fstat(fd, &st) != 0) {
+        snprintf(err, errlen, "stat zip: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
     uint64_t fsize = (uint64_t)st.st_size;
     size_t tail = fsize < 65557 + 22 ? (size_t)fsize : 65557 + 22;
-    uint8_t *tb = malloc(tail);
+    uint8_t *tb = malloc(tail ? tail : 1);
+    if (!tb) {
+        snprintf(err, errlen, "out of memory reading ZIP footer");
+        close(fd);
+        return -1;
+    }
     if (!pread_full(fd, tb, tail, (off_t)(fsize - tail))) {
         free(tb);
         close(fd);
@@ -109,12 +118,17 @@ int zip_extract_all(const char *zip_path, const char *dest_dir, char *err, size_
         }
     }
     free(tb);
-    if (cd_size > (512ull << 20) || cd_off + cd_size > fsize) {
+    if (cd_size > (512ull << 20) || cd_off > fsize || cd_size > fsize - cd_off) {
         close(fd);
         snprintf(err, errlen, "bad central directory");
         return -1;
     }
-    uint8_t *cd = malloc(cd_size);
+    uint8_t *cd = malloc(cd_size ? cd_size : 1);
+    if (!cd) {
+        snprintf(err, errlen, "out of memory reading ZIP directory");
+        close(fd);
+        return -1;
+    }
     if (!pread_full(fd, cd, cd_size, (off_t)cd_off)) {
         free(cd);
         close(fd);
@@ -123,11 +137,19 @@ int zip_extract_all(const char *zip_path, const char *dest_dir, char *err, size_
     }
 
     uint8_t *in = malloc(CHUNK), *outb = malloc(CHUNK);
+    if (!in || !outb) {
+        snprintf(err, errlen, "out of memory allocating ZIP extraction buffers");
+        free(in);
+        free(outb);
+        free(cd);
+        close(fd);
+        return -1;
+    }
     int rc = 0;
     uint64_t p = 0;
     for (uint64_t i = 0; i < entries && rc == 0; i++) {
         if (p + 46 > cd_size || rd32(cd + p) != 0x02014b50) {
-            snprintf(err, errlen, "bad CD entry %llu", i);
+            snprintf(err, errlen, "bad CD entry %llu", (unsigned long long)i);
             rc = -1;
             break;
         }
@@ -266,7 +288,13 @@ int zip_extract_all(const char *zip_path, const char *dest_dir, char *err, size_
         } else {
             z_stream zs;
             memset(&zs, 0, sizeof zs);
-            inflateInit2(&zs, -MAX_WBITS);
+            int init = inflateInit2(&zs, -MAX_WBITS);
+            if (init != Z_OK) {
+                snprintf(err, errlen, "%s: %s", init == Z_MEM_ERROR ? "out of memory initializing ZIP inflater" : "could not initialize ZIP inflater", name);
+                close(ofd);
+                rc = -1;
+                break;
+            }
             int zr = Z_OK;
             while (zr != Z_STREAM_END && rc == 0) {
                 if (zs.avail_in == 0) {
@@ -378,6 +406,11 @@ int zip_create_from_dir(const char *src_dir, const char *zip_path, char *err, si
     setvbuf(f, NULL, _IOFBF, 1 << 20);
     size_t cap = 1024, cnt = 0;
     went_t *ents = calloc(cap, sizeof *ents);
+    if (!ents) {
+        snprintf(err, errlen, "out of memory allocating ZIP output directory");
+        fclose(f);
+        return -1;
+    }
     char *const roots[] = {(char *)src_dir, NULL};
     FTS *fts = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR, fts_cmp);
     if (!fts) {
@@ -388,6 +421,15 @@ int zip_create_from_dir(const char *src_dir, const char *zip_path, char *err, si
     }
     size_t rootlen = strlen(src_dir);
     uint8_t *in = malloc(CHUNK), *outb = malloc(CHUNK);
+    if (!in || !outb) {
+        snprintf(err, errlen, "out of memory allocating ZIP output buffers");
+        free(in);
+        free(outb);
+        free(ents);
+        fts_close(fts);
+        fclose(f);
+        return -1;
+    }
     int rc = 0;
     FTSENT *e;
     while ((e = fts_read(fts)) && rc == 0) {
@@ -412,6 +454,11 @@ int zip_create_from_dir(const char *src_dir, const char *zip_path, char *err, si
         if (e->fts_info == FTS_D) {
             size_t l = strlen(rel);
             w->name = malloc(l + 2);
+            if (!w->name) {
+                snprintf(err, errlen, "out of memory allocating ZIP directory name");
+                rc = -1;
+                break;
+            }
             memcpy(w->name, rel, l);
             w->name[l] = '/';
             w->name[l + 1] = 0;
@@ -423,6 +470,11 @@ int zip_create_from_dir(const char *src_dir, const char *zip_path, char *err, si
             continue;
         }
         w->name = strdup(rel);
+        if (!w->name) {
+            snprintf(err, errlen, "out of memory allocating ZIP entry name");
+            rc = -1;
+            break;
+        }
         if (e->fts_info == FTS_SL) {
             char tgt[1024];
             ssize_t n = readlink(e->fts_path, tgt, sizeof tgt);
@@ -455,7 +507,14 @@ int zip_create_from_dir(const char *src_dir, const char *zip_path, char *err, si
         uint64_t data_start = (uint64_t)ftello(f);
         z_stream zs;
         memset(&zs, 0, sizeof zs);
-        deflateInit2(&zs, 6, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+        int init = deflateInit2(&zs, 6, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+        if (init != Z_OK) {
+            snprintf(err, errlen, "%s: %s", init == Z_MEM_ERROR ? "out of memory initializing ZIP compressor" : "could not initialize ZIP compressor", rel);
+            close(ifd);
+            free(w->name);
+            rc = -1;
+            break;
+        }
         uLong c = crc32(0, Z_NULL, 0);
         ssize_t r;
         int flush = Z_NO_FLUSH;

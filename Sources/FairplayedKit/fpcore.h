@@ -30,6 +30,7 @@ typedef struct {
     bool addsigs;
     int sig_errno; // 0 = F_ADDFILESIGS_RETURN ok (or not requested)
     int mmap_errno;
+    int buffer_errno;
     int mremap_ret, mremap_errno;
     uint64_t pages_total, pages_ok;
     int first_fail_kr;

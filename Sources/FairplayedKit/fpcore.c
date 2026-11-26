@@ -297,12 +297,13 @@ int fp_attempt(const char *path, const fp_slice_t *s, int mode, bool addsigs, ui
 
     uint8_t *orig = malloc(s->cryptsize);
     uint8_t *dec = out ? out : malloc(s->cryptsize);
-    if (!orig || !dec || !pread_full(fd, orig, s->cryptsize, (off_t)(s->slice_off + s->cryptoff))) {
+    if (!orig || !dec) res->buffer_errno = ENOMEM;
+    if (res->buffer_errno || !pread_full(fd, orig, s->cryptsize, (off_t)(s->slice_off + s->cryptoff))) {
         free(orig);
         if (!out) free(dec);
         munmap(base, map_len);
         close(fd);
-        res->mmap_errno = EIO;
+        if (!res->buffer_errno) res->mmap_errno = EIO;
         return -1;
     }
 
@@ -350,14 +351,15 @@ int fp_attempt(const char *path, const fp_slice_t *s, int mode, bool addsigs, ui
 void fp_attempt_describe(const fp_attempt_t *a, char *buf, size_t len) {
     snprintf(buf, len,
              "%s%s: sig=%s mmap=%s mremap=%d(errno %d %s) pages=%llu/%llu firstfail=kr%d@0x%llx changed=%d "
-             "code-words %u->%u entropy %.3f->%.3f (%.0f ms)",
+             "code-words %u->%u entropy %.3f->%.3f (%.0f ms) buffer_errno=%d %s",
              fp_mode_name(a->mode), a->addsigs ? "+sigs" : "",
              a->addsigs ? (a->sig_errno ? strerror(a->sig_errno) : "ok") : "-",
              a->mmap_errno ? strerror(a->mmap_errno) : "ok",
              a->mremap_ret, a->mremap_errno, a->mremap_errno ? strerror(a->mremap_errno) : "ok",
              (unsigned long long)a->pages_ok, (unsigned long long)a->pages_total,
              a->first_fail_kr, (unsigned long long)a->first_fail_off, a->changed,
-             a->ret_before, a->ret_after, a->ent_before, a->ent_after, a->ms);
+             a->ret_before, a->ret_after, a->ent_before, a->ent_after, a->ms,
+             a->buffer_errno, a->buffer_errno ? strerror(a->buffer_errno) : "ok");
 }
 
 static bool attempt_looks_decrypted(const fp_attempt_t *a) {
@@ -452,6 +454,11 @@ int fp_decrypt_file(const char *in_path, const char *out_path, fp_log_t log, voi
         const fp_slice_t *s = &sl[i];
         if (!s->has_enc || s->cryptid == 0) continue;
         uint8_t *dec = malloc(s->cryptsize);
+        if (!dec) {
+            logf_(log, ctx, "  allocate decrypted buffer (%u bytes): %s", s->cryptsize, strerror(ENOMEM));
+            rc = -1;
+            break;
+        }
         bool done = false;
         for (size_t k = 0; k < sizeof order / sizeof order[0] && !done; k++) {
             fp_attempt_t a;

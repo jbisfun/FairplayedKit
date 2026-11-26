@@ -41,6 +41,19 @@ typedef void (^LCFairPlayProgressHandler)(NSString *phase, NSUInteger completed,
                               error:(NSError **)error
     NS_SWIFT_NAME(decryptIPA(at:stagingRoots:outputURL:mainSinf:metadataPlist:progress:));
 
+/// With a non-nil omittedExtension callback, remove an extension whose
+/// executable or embedded Mach-O fails to decrypt. All remaining Mach-Os
+/// still have to pass verification. The callback runs only on success.
++ (nullable NSURL *)decryptIPAAtURL:(NSURL *)ipaURL
+                       stagingRoots:(NSArray<NSURL *> *)stagingRoots
+                          outputURL:(NSURL *)outputURL
+                           mainSinf:(nullable NSData *)mainSinf
+                      metadataPlist:(nullable NSData *)metadataPlist
+                   omittedExtension:(void (^ _Nullable)(NSString *path))omittedExtension
+                           progress:(nullable LCFairPlayProgressHandler)progress
+                              error:(NSError **)error
+    NS_SWIFT_NAME(decryptIPA(at:stagingRoots:outputURL:mainSinf:metadataPlist:omittedExtension:progress:));
+
 /// Convenience overload for IPAs that already contain their FairPlay SINF.
 + (nullable NSURL *)decryptIPAAtURL:(NSURL *)ipaURL
                        stagingRoots:(NSArray<NSURL *> *)stagingRoots

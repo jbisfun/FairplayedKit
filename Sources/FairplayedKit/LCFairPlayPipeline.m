@@ -6,6 +6,7 @@
 //
 
 #import "LCFairPlayPipeline.h"
+#import "extension_path.h"
 #import "fpcore.h"
 #import "zipio.h"
 
@@ -380,6 +381,7 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
                                    NSURL *outputURL,
                                    NSData *mainSinf,
                                    NSData *metadataPlist,
+                                   void (^omittedExtension)(NSString *),
                                    LCFairPlayProgressHandler progress,
                                    NSMutableArray<NSString *> *diagnostics,
                                    NSError **error) {
@@ -487,7 +489,15 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
 
         NSUInteger completed = 0;
         NSString *failedPath = nil;
+        NSMutableOrderedSet<NSString *> *omitted = [NSMutableOrderedSet orderedSet];
         for (NSString *relativePath in machOs) @autoreleasepool {
+                const char *path = relativePath.UTF8String;
+                size_t length = omittedExtension && path ? fp_extension_path_length(path) : 0;
+                NSString *extension = length ? [[NSString alloc] initWithBytes:path length:length encoding:NSUTF8StringEncoding] : nil;
+                if (extension && [omitted containsObject:extension]) {
+                    completed += 1;
+                    continue;
+                }
                 if (progress) {
                     progress(@"decrypting", completed, machOs.count);
                 }
@@ -498,6 +508,17 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
                                              resultPath.fileSystemRepresentation,
                                              LCFairPlayCoreLog,
                                              (__bridge void *)diagnostics);
+                if (result < 0 && extension) {
+                    NSURL *bundle = [resultAppURL URLByAppendingPathComponent:extension isDirectory:YES];
+                    NSError *removeError = nil;
+                    if (LCFairPlayURLIsBelowRoot(bundle, resultAppURL) && [fileManager removeItemAtURL:bundle error:&removeError]) {
+                        [omitted addObject:extension];
+                        [diagnostics addObject:[NSString stringWithFormat:@"Omitted %@ after decryption failed for %@.", extension, relativePath]];
+                        completed += 1;
+                        continue;
+                    }
+                    [diagnostics addObject:removeError.localizedDescription ?: @"Could not safely omit the failed extension."];
+                }
                 if (result < 0) {
                     failedPath = relativePath;
                     break;
@@ -553,6 +574,7 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
         if (progress) {
             progress(@"finished", 1, 1);
         }
+        for (NSString *extension in omitted) omittedExtension(extension);
         return outputURL;
     } @finally {
         [fileManager removeItemAtURL:temporaryIPAURL error:nil];
@@ -568,6 +590,19 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
                  outputURL:(NSURL *)outputURL
                   mainSinf:(NSData *)mainSinf
              metadataPlist:(NSData *)metadataPlist
+                  progress:(LCFairPlayProgressHandler)progress
+                     error:(NSError **)error {
+    return [self decryptIPAAtURL:ipaURL stagingRoots:stagingRoots outputURL:outputURL
+                       mainSinf:mainSinf metadataPlist:metadataPlist omittedExtension:nil
+                       progress:progress error:error];
+}
+
++ (NSURL *)decryptIPAAtURL:(NSURL *)ipaURL
+              stagingRoots:(NSArray<NSURL *> *)stagingRoots
+                 outputURL:(NSURL *)outputURL
+                  mainSinf:(NSData *)mainSinf
+             metadataPlist:(NSData *)metadataPlist
+          omittedExtension:(void (^)(NSString *))omittedExtension
                   progress:(LCFairPlayProgressHandler)progress
                      error:(NSError **)error {
 #if TARGET_OS_SIMULATOR
@@ -605,7 +640,7 @@ static NSURL *LCFairPlayRunAttempt(NSURL *ipaURL,
         [diagnostics addObject:[NSString stringWithFormat:@"Trying FairPlay staging root: %@", rootPath]];
 
         NSURL *result = LCFairPlayRunAttempt(ipaURL, rootURL, outputURL, mainSinf, metadataPlist,
-                                             progress, diagnostics, &lastError);
+                                             omittedExtension, progress, diagnostics, &lastError);
         if (result) {
             return result;
         }
